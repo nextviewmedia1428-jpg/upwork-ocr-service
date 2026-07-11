@@ -46,8 +46,17 @@ def health():
     return {"status": "ok"}
 
 
+# ponytail: routes are plain `def`, not `async def` — every path below is
+# blocking sync code (subprocess.run, pytesseract), and an async route runs
+# straight on the single event loop thread, so one slow request freezes the
+# ENTIRE service (confirmed live: a 1x1 pixel image on /ocr hung with zero
+# response while a prior video request was still processing). Plain `def`
+# lets Starlette dispatch each request onto its own threadpool worker instead.
+OCR_TIMEOUT_SECONDS = 10  # per-frame safety net; a hung Tesseract call has no timeout otherwise
+
+
 @app.post("/ocr")
-async def ocr(req: OcrRequest, request: Request):
+def ocr(req: OcrRequest, request: Request):
     if SHARED_SECRET and request.headers.get("x-ocr-secret") != SHARED_SECRET:
         raise HTTPException(status_code=401, detail="unauthorized")
 
@@ -55,13 +64,13 @@ async def ocr(req: OcrRequest, request: Request):
     for b64 in req.images:
         image_bytes = base64.b64decode(b64)
         img = Image.open(io.BytesIO(image_bytes))
-        per_image.append(pytesseract.image_to_string(img))
+        per_image.append(pytesseract.image_to_string(img, timeout=OCR_TIMEOUT_SECONDS))
 
     return {"text": "\n\n---\n\n".join(per_image), "perImage": per_image}
 
 
 @app.post("/ocr-video")
-async def ocr_video(req: OcrVideoRequest, request: Request):
+def ocr_video(req: OcrVideoRequest, request: Request):
     if SHARED_SECRET and request.headers.get("x-ocr-secret") != SHARED_SECRET:
         raise HTTPException(status_code=401, detail="unauthorized")
 
@@ -97,9 +106,17 @@ async def ocr_video(req: OcrVideoRequest, request: Request):
                 ),
             )
 
-        per_image = [
-            pytesseract.image_to_string(Image.open(p), config=TESSERACT_CONFIG) for p in frame_paths
-        ]
+        per_image = []
+        for p in frame_paths:
+            try:
+                per_image.append(
+                    pytesseract.image_to_string(
+                        Image.open(p), config=TESSERACT_CONFIG, timeout=OCR_TIMEOUT_SECONDS
+                    )
+                )
+            except RuntimeError:
+                per_image.append("")  # frame timed out; skip it rather than fail the whole batch
+
         return {"text": "\n\n---\n\n".join(per_image), "perImage": per_image}
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
