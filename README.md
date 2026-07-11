@@ -26,20 +26,20 @@ subsequent requests are fast. Fine for an occasional-use internal tool.
 - `POST /ocr` — body `{"images": ["<base64>", ...]}`, header `x-ocr-secret: <shared secret>`,
   returns `{"text": "<concatenated OCR text>", "perImage": ["<text per image>"]}`
 - `POST /ocr-video` — body `{"video": "<base64>", "fileExtension": "mp4"}`, header
-  `x-ocr-secret: <shared secret>`. Extracts *key frames* via `ffmpeg`'s
-  `mpdecimate` filter (drops near-duplicate consecutive frames — the actual
-  fix for a scrolling recording's static pauses producing many redundant
-  samples), downscaled to 1000px wide (capped at 20 distinct frames —
-  recordings with no static stretches at all are rejected with `413`), then
-  OCRs each surviving frame with `--oem 1` (LSTM-only, faster than the default
-  engine auto-detect). Returns the same `{"text", "perImage"}` shape as `/ocr`,
-  so it's a drop-in alternative source for the same downstream parsing —
-  including the overlap-anchor text stitching in n8n's `Parse OCR Text`, which
-  works identically regardless of frame source. Deduping before OCR (not just
-  downscaling) is what keeps this under Render's edge-proxy `502 Bad gateway`
-  — it returns that if the app doesn't respond within ~100s regardless of the
-  client's own timeout, and OCR-ing every near-identical sampled frame on a
-  free-tier CPU burns through that budget fast.
+  `x-ocr-secret: <shared secret>`. Extracts frames via `ffmpeg` at a sparse
+  0.5 frames/sec (one every 2s, capped at 20 frames = up to 40s of recording —
+  longer recordings are rejected with `413`), downscaled to 1000px wide, OCR'd
+  with `--oem 1` (LSTM-only, faster than the default engine auto-detect).
+  Returns the same `{"text", "perImage"}` shape as `/ocr`, so it's a drop-in
+  alternative source for the same downstream parsing — including the
+  overlap-anchor text stitching in n8n's `Parse OCR Text`, which reassembles
+  the partially-overlapping content between sparse samples exactly like it
+  does for multi-screenshot uploads. (An earlier version tried `mpdecimate`
+  to skip "duplicate" frames, but real thumb-scrolling is continuous motion —
+  no two frames are pixel-identical — so it decimated nothing; sparse
+  time-based sampling is the actual fix.) Frame count still has to stay
+  bounded because Render's edge proxy returns `502 Bad gateway` if the app
+  doesn't respond within ~100s, regardless of the client's own timeout.
 
 ## Local testing
 

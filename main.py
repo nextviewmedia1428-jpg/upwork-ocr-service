@@ -15,18 +15,19 @@ app = FastAPI()
 
 SHARED_SECRET = os.environ.get("OCR_SHARED_SECRET", "")
 
-# ponytail: Render's edge proxy hard-times-out around ~100s regardless of any
-# timeout set in n8n — a 502 "Bad gateway" means the app didn't respond in time,
-# not that the service spun down. The biggest lever isn't downscaling, it's not
-# OCR-ing near-duplicate frames at all: a screen recording of scrolling has long
-# static stretches (pauses) sampled at fixed fps into many near-identical frames.
-# mpdecimate (native ffmpeg filter) drops those before OCR ever sees them, so a
-# 15s recording with 3 real scroll-stops OCRs ~3-5 frames instead of ~15.
-# fps= pre-samples so mpdecimate isn't diffing every native frame (cheap, and
-# bounds worst case); -vsync vfr is required or the muxer re-pads dropped
-# frames back to a constant rate and decimation has no effect.
-VIDEO_SAMPLE_FPS = 3
-MAX_VIDEO_FRAMES = 20  # safety net for a badly-behaved video with no static stretches at all
+# ponytail: mpdecimate (tried first) assumes near-duplicate = pixel-identical,
+# which only happens if the user pauses mid-scroll. Real thumb-scrolling is
+# continuous motion — every sampled frame differs a little — so it decimated
+# nothing and a real recording still produced 41 frames (execution 9299).
+# The fix isn't detecting "key frames", it's sampling sparsely and letting the
+# same overlap-anchor text stitching already used for multi-screenshot merges
+# (Parse OCR Text's mergeWithOverlap) reassemble the partially-overlapping
+# content — a low-fps video sample IS just an auto-taken screenshot series.
+# Render's edge proxy hard-times-out around ~100s regardless of any timeout
+# set in n8n (a 502 means the app didn't respond in time, not that it spun
+# down), so frame count still has to stay bounded.
+VIDEO_FPS = 0.5  # one sample every 2s — leaves real overlap for stitching, unlike 1fps+dedup
+MAX_VIDEO_FRAMES = 20  # 20 frames at 0.5fps = up to 40s of recording
 FRAME_WIDTH = 1000  # downscale before OCR; job-posting text is legible well below this
 TESSERACT_CONFIG = "--oem 1"  # LSTM-only, skips slower legacy-engine fallback attempts
 
@@ -75,8 +76,7 @@ async def ocr_video(req: OcrVideoRequest, request: Request):
         result = subprocess.run(
             [
                 "ffmpeg", "-i", video_path,
-                "-vf", f"fps={VIDEO_SAMPLE_FPS},mpdecimate,scale={FRAME_WIDTH}:-1",
-                "-vsync", "vfr",
+                "-vf", f"fps={VIDEO_FPS},scale={FRAME_WIDTH}:-1",
                 "-q:v", "3", frame_pattern,
             ],
             capture_output=True,
@@ -92,9 +92,8 @@ async def ocr_video(req: OcrVideoRequest, request: Request):
             raise HTTPException(
                 status_code=413,
                 detail=(
-                    f"Recording produced {len(frame_paths)} distinct frames — "
-                    f"pause briefly after each scroll so near-duplicate frames get "
-                    f"deduped, or keep the recording shorter (cap is {MAX_VIDEO_FRAMES})"
+                    f"Recording produced {len(frame_paths)} frames at {VIDEO_FPS}fps — "
+                    f"keep screen recordings under {int(MAX_VIDEO_FRAMES / VIDEO_FPS)} seconds"
                 ),
             )
 
