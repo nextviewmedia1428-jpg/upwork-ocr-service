@@ -15,11 +15,17 @@ app = FastAPI()
 
 SHARED_SECRET = os.environ.get("OCR_SHARED_SECRET", "")
 
-# ponytail: fixed at 1 frame/sec, capped at 30 frames (~30s of recording) — enough
-# coverage for scrolling through a job posting without letting a long clip burn
-# unbounded CPU/time on Render's free tier. Raise if real recordings need more.
+# ponytail: Render's edge proxy hard-times-out around ~100s regardless of any
+# timeout set in n8n — a 502 "Bad gateway" means the app didn't respond in time,
+# not that the service spun down. Cold start (30-60s) + N frames of Tesseract on
+# a throttled free-tier CPU can easily exceed that, so frame count is capped low
+# and frames are downscaled (Tesseract speed scales with image size). Raise
+# MAX_VIDEO_FRAMES only if cold-start mitigation (Workflow B's wake call) makes
+# this the bottleneck again.
 VIDEO_FPS = 1
-MAX_VIDEO_FRAMES = 30
+MAX_VIDEO_FRAMES = 15
+FRAME_WIDTH = 1000  # downscale before OCR; job-posting text is legible well below this
+TESSERACT_CONFIG = "--oem 1"  # LSTM-only, skips slower legacy-engine fallback attempts
 
 
 class OcrRequest(BaseModel):
@@ -64,9 +70,13 @@ async def ocr_video(req: OcrVideoRequest, request: Request):
 
         frame_pattern = os.path.join(tmp_dir, "frame_%04d.jpg")
         result = subprocess.run(
-            ["ffmpeg", "-i", video_path, "-vf", f"fps={VIDEO_FPS}", "-q:v", "3", frame_pattern],
+            [
+                "ffmpeg", "-i", video_path,
+                "-vf", f"fps={VIDEO_FPS},scale={FRAME_WIDTH}:-1",
+                "-q:v", "3", frame_pattern,
+            ],
             capture_output=True,
-            timeout=120,
+            timeout=90,
         )
         frame_paths = sorted(glob.glob(os.path.join(tmp_dir, "frame_*.jpg")))
 
@@ -83,7 +93,9 @@ async def ocr_video(req: OcrVideoRequest, request: Request):
                 ),
             )
 
-        per_image = [pytesseract.image_to_string(Image.open(p)) for p in frame_paths]
+        per_image = [
+            pytesseract.image_to_string(Image.open(p), config=TESSERACT_CONFIG) for p in frame_paths
+        ]
         return {"text": "\n\n---\n\n".join(per_image), "perImage": per_image}
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)

@@ -26,10 +26,15 @@ subsequent requests are fast. Fine for an occasional-use internal tool.
 - `POST /ocr` — body `{"images": ["<base64>", ...]}`, header `x-ocr-secret: <shared secret>`,
   returns `{"text": "<concatenated OCR text>", "perImage": ["<text per image>"]}`
 - `POST /ocr-video` — body `{"video": "<base64>", "fileExtension": "mp4"}`, header
-  `x-ocr-secret: <shared secret>`. Extracts frames via `ffmpeg` at 1 frame/sec
-  (capped at 30 frames — recordings over ~30s are rejected with `413`), then
-  OCRs each frame. Returns the same `{"text", "perImage"}` shape as `/ocr`, so
-  it's a drop-in alternative source for the same downstream parsing.
+  `x-ocr-secret: <shared secret>`. Extracts frames via `ffmpeg` at 1 frame/sec,
+  downscaled to 1000px wide (capped at 15 frames — recordings over ~15s are
+  rejected with `413`), then OCRs each frame with `--oem 1` (LSTM-only, faster
+  than the default engine auto-detect). Returns the same `{"text", "perImage"}`
+  shape as `/ocr`, so it's a drop-in alternative source for the same downstream
+  parsing. The frame cap and downscaling exist because Render's edge proxy
+  returns a `502 Bad gateway` if the app doesn't respond within ~100s
+  regardless of the client's own timeout — keeping total OCR work small is the
+  only way to stay under that ceiling on a free-tier CPU.
 
 ## Local testing
 
