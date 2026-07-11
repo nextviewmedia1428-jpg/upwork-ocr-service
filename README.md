@@ -27,7 +27,7 @@ subsequent requests are fast. Fine for an occasional-use internal tool.
   returns `{"text": "<concatenated OCR text>", "perImage": ["<text per image>"]}`
 - `POST /ocr-video` — body `{"video": "<base64>", "fileExtension": "mp4"}`, header
   `x-ocr-secret: <shared secret>`. Extracts frames via `ffmpeg` at a sparse
-  0.5 frames/sec (one every 2s, capped at 20 frames = up to 40s of recording —
+  0.5 frames/sec (one every 2s, capped at 10 frames = up to 20s of recording —
   longer recordings are rejected with `413`), downscaled to 1000px wide, OCR'd
   with `--oem 1` (LSTM-only, faster than the default engine auto-detect).
   Returns the same `{"text", "perImage"}` shape as `/ocr`, so it's a drop-in
@@ -37,9 +37,11 @@ subsequent requests are fast. Fine for an occasional-use internal tool.
   does for multi-screenshot uploads. (An earlier version tried `mpdecimate`
   to skip "duplicate" frames, but real thumb-scrolling is continuous motion —
   no two frames are pixel-identical — so it decimated nothing; sparse
-  time-based sampling is the actual fix.) Frame count still has to stay
-  bounded because Render's edge proxy returns `502 Bad gateway` if the app
-  doesn't respond within ~100s, regardless of the client's own timeout.
+  time-based sampling is the actual fix.) The 20s cap is set to what's been
+  measured live against Render's free-tier CPU (a 20s/10-frame recording
+  takes ~125s end-to-end there — roughly 4-5x slower than local Docker
+  testing suggested), with n8n's own HTTP node timeout for this call set to
+  180s to leave real margin above that.
 
 ## Local testing
 

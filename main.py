@@ -23,11 +23,14 @@ SHARED_SECRET = os.environ.get("OCR_SHARED_SECRET", "")
 # same overlap-anchor text stitching already used for multi-screenshot merges
 # (Parse OCR Text's mergeWithOverlap) reassemble the partially-overlapping
 # content — a low-fps video sample IS just an auto-taken screenshot series.
-# Render's edge proxy hard-times-out around ~100s regardless of any timeout
-# set in n8n (a 502 means the app didn't respond in time, not that it spun
-# down), so frame count still has to stay bounded.
+# Measured directly against the live Render free-tier instance (not just
+# locally, where it's ~4-5x faster): a real 1080x1920 20s/10-frame recording
+# takes ~125s end-to-end — much slower than local Docker testing suggested.
+# The cap below is set to what's actually been verified live, not guessed;
+# raise it only after measuring the new worst case against the live service,
+# and keep n8n's HTTP node timeout comfortably above it (see workflow_f.py).
 VIDEO_FPS = 0.5  # one sample every 2s — leaves real overlap for stitching, unlike 1fps+dedup
-MAX_VIDEO_FRAMES = 20  # 20 frames at 0.5fps = up to 40s of recording
+MAX_VIDEO_FRAMES = 10  # 10 frames at 0.5fps = up to 20s of recording — matches measured live timing
 FRAME_WIDTH = 1000  # downscale before OCR; job-posting text is legible well below this
 TESSERACT_CONFIG = "--oem 1"  # LSTM-only, skips slower legacy-engine fallback attempts
 
