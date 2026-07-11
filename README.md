@@ -26,15 +26,20 @@ subsequent requests are fast. Fine for an occasional-use internal tool.
 - `POST /ocr` — body `{"images": ["<base64>", ...]}`, header `x-ocr-secret: <shared secret>`,
   returns `{"text": "<concatenated OCR text>", "perImage": ["<text per image>"]}`
 - `POST /ocr-video` — body `{"video": "<base64>", "fileExtension": "mp4"}`, header
-  `x-ocr-secret: <shared secret>`. Extracts frames via `ffmpeg` at 1 frame/sec,
-  downscaled to 1000px wide (capped at 15 frames — recordings over ~15s are
-  rejected with `413`), then OCRs each frame with `--oem 1` (LSTM-only, faster
-  than the default engine auto-detect). Returns the same `{"text", "perImage"}`
-  shape as `/ocr`, so it's a drop-in alternative source for the same downstream
-  parsing. The frame cap and downscaling exist because Render's edge proxy
-  returns a `502 Bad gateway` if the app doesn't respond within ~100s
-  regardless of the client's own timeout — keeping total OCR work small is the
-  only way to stay under that ceiling on a free-tier CPU.
+  `x-ocr-secret: <shared secret>`. Extracts *key frames* via `ffmpeg`'s
+  `mpdecimate` filter (drops near-duplicate consecutive frames — the actual
+  fix for a scrolling recording's static pauses producing many redundant
+  samples), downscaled to 1000px wide (capped at 20 distinct frames —
+  recordings with no static stretches at all are rejected with `413`), then
+  OCRs each surviving frame with `--oem 1` (LSTM-only, faster than the default
+  engine auto-detect). Returns the same `{"text", "perImage"}` shape as `/ocr`,
+  so it's a drop-in alternative source for the same downstream parsing —
+  including the overlap-anchor text stitching in n8n's `Parse OCR Text`, which
+  works identically regardless of frame source. Deduping before OCR (not just
+  downscaling) is what keeps this under Render's edge-proxy `502 Bad gateway`
+  — it returns that if the app doesn't respond within ~100s regardless of the
+  client's own timeout, and OCR-ing every near-identical sampled frame on a
+  free-tier CPU burns through that budget fast.
 
 ## Local testing
 

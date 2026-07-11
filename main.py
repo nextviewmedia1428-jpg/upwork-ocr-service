@@ -17,13 +17,16 @@ SHARED_SECRET = os.environ.get("OCR_SHARED_SECRET", "")
 
 # ponytail: Render's edge proxy hard-times-out around ~100s regardless of any
 # timeout set in n8n — a 502 "Bad gateway" means the app didn't respond in time,
-# not that the service spun down. Cold start (30-60s) + N frames of Tesseract on
-# a throttled free-tier CPU can easily exceed that, so frame count is capped low
-# and frames are downscaled (Tesseract speed scales with image size). Raise
-# MAX_VIDEO_FRAMES only if cold-start mitigation (Workflow B's wake call) makes
-# this the bottleneck again.
-VIDEO_FPS = 1
-MAX_VIDEO_FRAMES = 15
+# not that the service spun down. The biggest lever isn't downscaling, it's not
+# OCR-ing near-duplicate frames at all: a screen recording of scrolling has long
+# static stretches (pauses) sampled at fixed fps into many near-identical frames.
+# mpdecimate (native ffmpeg filter) drops those before OCR ever sees them, so a
+# 15s recording with 3 real scroll-stops OCRs ~3-5 frames instead of ~15.
+# fps= pre-samples so mpdecimate isn't diffing every native frame (cheap, and
+# bounds worst case); -vsync vfr is required or the muxer re-pads dropped
+# frames back to a constant rate and decimation has no effect.
+VIDEO_SAMPLE_FPS = 3
+MAX_VIDEO_FRAMES = 20  # safety net for a badly-behaved video with no static stretches at all
 FRAME_WIDTH = 1000  # downscale before OCR; job-posting text is legible well below this
 TESSERACT_CONFIG = "--oem 1"  # LSTM-only, skips slower legacy-engine fallback attempts
 
@@ -72,7 +75,8 @@ async def ocr_video(req: OcrVideoRequest, request: Request):
         result = subprocess.run(
             [
                 "ffmpeg", "-i", video_path,
-                "-vf", f"fps={VIDEO_FPS},scale={FRAME_WIDTH}:-1",
+                "-vf", f"fps={VIDEO_SAMPLE_FPS},mpdecimate,scale={FRAME_WIDTH}:-1",
+                "-vsync", "vfr",
                 "-q:v", "3", frame_pattern,
             ],
             capture_output=True,
@@ -88,8 +92,9 @@ async def ocr_video(req: OcrVideoRequest, request: Request):
             raise HTTPException(
                 status_code=413,
                 detail=(
-                    f"Recording produced {len(frame_paths)} frames at {VIDEO_FPS}fps — "
-                    f"keep screen recordings under {MAX_VIDEO_FRAMES} seconds"
+                    f"Recording produced {len(frame_paths)} distinct frames — "
+                    f"pause briefly after each scroll so near-duplicate frames get "
+                    f"deduped, or keep the recording shorter (cap is {MAX_VIDEO_FRAMES})"
                 ),
             )
 
