@@ -5,8 +5,9 @@ import os
 import shutil
 import subprocess
 import tempfile
+import uuid
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from PIL import Image
 from pydantic import BaseModel
 import pytesseract
@@ -23,16 +24,21 @@ SHARED_SECRET = os.environ.get("OCR_SHARED_SECRET", "")
 # same overlap-anchor text stitching already used for multi-screenshot merges
 # (Parse OCR Text's mergeWithOverlap) reassemble the partially-overlapping
 # content — a low-fps video sample IS just an auto-taken screenshot series.
-# Measured directly against the live Render free-tier instance (not just
-# locally, where it's ~4-5x faster): a real 1080x1920 20s/10-frame recording
-# takes ~125s end-to-end — much slower than local Docker testing suggested.
-# The cap below is set to what's actually been verified live, not guessed;
-# raise it only after measuring the new worst case against the live service,
-# and keep n8n's HTTP node timeout comfortably above it (see workflow_f.py).
 VIDEO_FPS = 0.5  # one sample every 2s — leaves real overlap for stitching, unlike 1fps+dedup
-MAX_VIDEO_FRAMES = 10  # 10 frames at 0.5fps = up to 20s of recording — matches measured live timing
+MAX_VIDEO_FRAMES = 10  # 10 frames at 0.5fps = up to 20s of recording
 FRAME_WIDTH = 1000  # downscale before OCR; job-posting text is legible well below this
 TESSERACT_CONFIG = "--oem 1"  # LSTM-only, skips slower legacy-engine fallback attempts
+
+# ponytail: measured directly against the live Render free-tier instance —
+# a single realistic 1000px-wide job-posting frame takes 37-43s through
+# Tesseract there (roughly 20-40x slower than local Docker testing showed,
+# and unrelated to --oem 1 — /ocr doesn't even set that flag and is equally
+# slow). No synchronous HTTP timeout can cover N frames at that rate, so
+# /ocr-video is now a submit-then-poll job queue instead of one blocking
+# call: it returns a jobId immediately and does the real work in a
+# BackgroundTasks callback. In-memory dict is fine — single Render
+# instance, internal tool, job state loss on restart is acceptable.
+jobs: dict[str, dict] = {}
 
 
 class OcrRequest(BaseModel):
@@ -75,17 +81,13 @@ def ocr(req: OcrRequest, request: Request):
     return {"text": "\n\n---\n\n".join(per_image), "perImage": per_image}
 
 
-@app.post("/ocr-video")
-def ocr_video(req: OcrVideoRequest, request: Request):
-    if SHARED_SECRET and request.headers.get("x-ocr-secret") != SHARED_SECRET:
-        raise HTTPException(status_code=401, detail="unauthorized")
-
+def _process_video_job(job_id: str, video_b64: str, file_extension: str):
     tmp_dir = tempfile.mkdtemp()
     try:
-        ext = (req.fileExtension or "mp4").lstrip(".")
+        ext = (file_extension or "mp4").lstrip(".")
         video_path = os.path.join(tmp_dir, f"input.{ext}")
         with open(video_path, "wb") as f:
-            f.write(base64.b64decode(req.video))
+            f.write(base64.b64decode(video_b64))
 
         frame_pattern = os.path.join(tmp_dir, "frame_%04d.jpg")
         result = subprocess.run(
@@ -101,16 +103,18 @@ def ocr_video(req: OcrVideoRequest, request: Request):
 
         if result.returncode != 0 or not frame_paths:
             stderr_tail = result.stderr.decode(errors="ignore")[-500:]
-            raise HTTPException(status_code=422, detail=f"Could not read video: {stderr_tail}")
+            jobs[job_id] = {"status": "error", "detail": f"Could not read video: {stderr_tail}"}
+            return
 
         if len(frame_paths) > MAX_VIDEO_FRAMES:
-            raise HTTPException(
-                status_code=413,
-                detail=(
+            jobs[job_id] = {
+                "status": "error",
+                "detail": (
                     f"Recording produced {len(frame_paths)} frames at {VIDEO_FPS}fps — "
                     f"keep screen recordings under {int(MAX_VIDEO_FRAMES / VIDEO_FPS)} seconds"
                 ),
-            )
+            }
+            return
 
         per_image = []
         for p in frame_paths:
@@ -123,6 +127,30 @@ def ocr_video(req: OcrVideoRequest, request: Request):
             except RuntimeError:
                 per_image.append("")  # frame timed out; skip it rather than fail the whole batch
 
-        return {"text": "\n\n---\n\n".join(per_image), "perImage": per_image}
+        jobs[job_id] = {"status": "done", "text": "\n\n---\n\n".join(per_image), "perImage": per_image}
+    except Exception as e:
+        jobs[job_id] = {"status": "error", "detail": str(e)}
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+@app.post("/ocr-video")
+def ocr_video(req: OcrVideoRequest, request: Request, background_tasks: BackgroundTasks):
+    if SHARED_SECRET and request.headers.get("x-ocr-secret") != SHARED_SECRET:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    job_id = uuid.uuid4().hex
+    jobs[job_id] = {"status": "pending"}
+    background_tasks.add_task(_process_video_job, job_id, req.video, req.fileExtension)
+    return {"jobId": job_id, "status": "pending"}
+
+
+@app.get("/ocr-video/status/{job_id}")
+def ocr_video_status(job_id: str, request: Request):
+    if SHARED_SECRET and request.headers.get("x-ocr-secret") != SHARED_SECRET:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="unknown job id")
+    return {"jobId": job_id, **job}

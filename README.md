@@ -26,22 +26,31 @@ subsequent requests are fast. Fine for an occasional-use internal tool.
 - `POST /ocr` — body `{"images": ["<base64>", ...]}`, header `x-ocr-secret: <shared secret>`,
   returns `{"text": "<concatenated OCR text>", "perImage": ["<text per image>"]}`
 - `POST /ocr-video` — body `{"video": "<base64>", "fileExtension": "mp4"}`, header
-  `x-ocr-secret: <shared secret>`. Extracts frames via `ffmpeg` at a sparse
-  0.5 frames/sec (one every 2s, capped at 10 frames = up to 20s of recording —
-  longer recordings are rejected with `413`), downscaled to 1000px wide, OCR'd
-  with `--oem 1` (LSTM-only, faster than the default engine auto-detect).
-  Returns the same `{"text", "perImage"}` shape as `/ocr`, so it's a drop-in
-  alternative source for the same downstream parsing — including the
-  overlap-anchor text stitching in n8n's `Parse OCR Text`, which reassembles
-  the partially-overlapping content between sparse samples exactly like it
-  does for multi-screenshot uploads. (An earlier version tried `mpdecimate`
-  to skip "duplicate" frames, but real thumb-scrolling is continuous motion —
-  no two frames are pixel-identical — so it decimated nothing; sparse
-  time-based sampling is the actual fix.) The 20s cap is set to what's been
-  measured live against Render's free-tier CPU (a 20s/10-frame recording
-  takes ~125s end-to-end there — roughly 4-5x slower than local Docker
-  testing suggested), with n8n's own HTTP node timeout for this call set to
-  180s to leave real margin above that.
+  `x-ocr-secret: <shared secret>`. **Async job queue, not a blocking call** —
+  returns immediately with `{"jobId": "...", "status": "pending"}` and does
+  the real work in a background task. Extracts frames via `ffmpeg` at a
+  sparse 0.5 frames/sec (one every 2s, capped at 10 frames = up to 20s of
+  recording — longer recordings resolve to `status: "error"`), downscaled to
+  1000px wide, OCR'd with `--oem 1`. (An earlier version tried `mpdecimate` to
+  skip "duplicate" frames, but real thumb-scrolling is continuous motion — no
+  two frames are pixel-identical — so it decimated nothing; sparse time-based
+  sampling is the actual fix, with the overlap-anchor stitching in n8n's
+  `Parse OCR Text` reassembling the partially-overlapping content between
+  samples, same as it does for multi-screenshot uploads.)
+
+  **Why async:** measured directly against the live Render free-tier
+  instance, a single realistic 1000px-wide frame takes 37-43s through
+  Tesseract there — 20-40x slower than local Docker testing suggested, and
+  unrelated to `--oem 1` (`/ocr` doesn't even set that flag and is equally
+  slow). No synchronous HTTP timeout can cover 10 frames at that rate
+  (~400-600s worst case), so the client submits once and polls instead.
+
+- `GET /ocr-video/status/{jobId}` — header `x-ocr-secret: <shared secret>`.
+  Returns `{"jobId", "status": "pending"}` while running, or on completion
+  `{"jobId", "status": "done", "text", "perImage"}` (same shape as `/ocr`) or
+  `{"jobId", "status": "error", "detail"}`. `404` for an unknown job id. Job
+  state is an in-memory dict — fine for a single-instance internal tool, but
+  is lost if Render restarts the service mid-job.
 
 ## Local testing
 
