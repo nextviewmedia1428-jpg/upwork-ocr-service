@@ -55,7 +55,7 @@ def health():
 # ENTIRE service (confirmed live: a 1x1 pixel image on /ocr hung with zero
 # response while a prior video request was still processing). Plain `def`
 # lets Starlette dispatch each request onto its own threadpool worker instead.
-OCR_TIMEOUT_SECONDS = 10  # per-frame safety net; a hung Tesseract call has no timeout otherwise
+OCR_TIMEOUT_SECONDS = 60  # per-frame safety net; a hung Tesseract call has no timeout otherwise
 
 
 @app.post("/ocr")
@@ -67,7 +67,10 @@ def ocr(req: OcrRequest, request: Request):
     for b64 in req.images:
         image_bytes = base64.b64decode(b64)
         img = Image.open(io.BytesIO(image_bytes))
-        per_image.append(pytesseract.image_to_string(img, timeout=OCR_TIMEOUT_SECONDS))
+        try:
+            per_image.append(pytesseract.image_to_string(img, timeout=OCR_TIMEOUT_SECONDS))
+        except RuntimeError:
+            per_image.append("")  # image timed out; skip it rather than fail the whole batch
 
     return {"text": "\n\n---\n\n".join(per_image), "perImage": per_image}
 
