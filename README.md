@@ -1,8 +1,9 @@
 # Upwork OCR Service
 
 Tiny FastAPI + Tesseract OCR microservice. Accepts base64-encoded screenshot
-images, returns raw extracted text. Used by n8n Workflow F to pull text out
-of Upwork job screenshots before regex-parsing it into sheet fields.
+images (or a screen-recording video, frame-extracted via `ffmpeg`), returns
+raw extracted text. Used by n8n Workflow F to pull text out of Upwork job
+captures before regex-parsing it into sheet fields.
 
 ## Deploying to Render (free tier)
 
@@ -24,6 +25,11 @@ subsequent requests are fast. Fine for an occasional-use internal tool.
 - `GET /health` — returns `{"status": "ok"}`
 - `POST /ocr` — body `{"images": ["<base64>", ...]}`, header `x-ocr-secret: <shared secret>`,
   returns `{"text": "<concatenated OCR text>", "perImage": ["<text per image>"]}`
+- `POST /ocr-video` — body `{"video": "<base64>", "fileExtension": "mp4"}`, header
+  `x-ocr-secret: <shared secret>`. Extracts frames via `ffmpeg` at 1 frame/sec
+  (capped at 30 frames — recordings over ~30s are rejected with `413`), then
+  OCRs each frame. Returns the same `{"text", "perImage"}` shape as `/ocr`, so
+  it's a drop-in alternative source for the same downstream parsing.
 
 ## Local testing
 
